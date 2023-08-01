@@ -29,7 +29,7 @@ async function generateCustomQRCode(data) {
   stream.pipe(out);
 }
 
-const data = "Hello World";
+const data = "https://olagunjuraman.github.io/argentavis-demo/payment-option";
 
 QRCode.toDataURL(data, (err, url) => {
   console.log(generateCustomQRCode(data));

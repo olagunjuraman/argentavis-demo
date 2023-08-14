@@ -6,8 +6,17 @@ const mongoose = require("mongoose");
 const { v4: uuidv4 } = require("uuid");
 const dotenv = require("dotenv");
 const qrQueue = require("./queue");
+const cloudinary = require("cloudinary").v2;
+
 
 dotenv.config({});
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
 
 const app = express();
 const port = 3000;
@@ -47,10 +56,10 @@ qrQueue.process(async (job) => {
     const uuid = uuidv4();
     const data = `https://momo-payment-48xe4nhf9-iamswart.vercel.app/?uuid=${uuid}`;
     const buffer = await generateCustomQRCode(data);
-    const s3Link = await uploadToS3(buffer, `qrcodes/${Date.now()}.png`);
-    const qrEntry = new QRCodeModel({ uuid, s3URL: s3Link });
+    const cloudinaryLink = await uploadToCloudinary(buffer); // Notice the change here
+    const qrEntry = new QRCodeModel({ uuid, s3URL: cloudinaryLink }); // Maybe rename `s3URL` to a more generic name
     await qrEntry.save();
-    return { uuid, s3URL: s3Link };
+    return { uuid, s3URL: cloudinaryLink };
   } catch (error) {
     console.log(error);
   }
@@ -78,22 +87,38 @@ async function generateCustomQRCode(data) {
   return canvas.toBuffer();
 }
 
-async function uploadToS3(buffer, key) {
-  const params = {
-    Bucket: BUCKET_NAME,
-    Key: key,
-    Body: buffer,
-    ContentType: "image/png",
-  };
+// async function uploadToS3(buffer, key) {
+//   const params = {
+//     Bucket: BUCKET_NAME,
+//     Key: key,
+//     Body: buffer,
+//     ContentType: "image/png",
+//   };
 
+//   return new Promise((resolve, reject) => {
+//     s3.upload(params, (error, data) => {
+//       if (error) {
+//         reject(error);
+//       } else {
+//         resolve(data.Location);
+//       }
+//     });
+//   });
+// }
+
+async function uploadToCloudinary(buffer) {
   return new Promise((resolve, reject) => {
-    s3.upload(params, (error, data) => {
+    const uploadStream = cloudinary.uploader.upload_stream((error, result) => {
       if (error) {
         reject(error);
       } else {
-        resolve(data.Location);
+        resolve(result.url); // This will return the URL of the uploaded image on Cloudinary
       }
     });
+
+    // Since Cloudinary's SDK expects a readable stream, we convert the buffer to one.
+    const readableStream = require("stream").Readable.from(buffer);
+    readableStream.pipe(uploadStream);
   });
 }
 

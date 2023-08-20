@@ -2,12 +2,15 @@ const express = require("express");
 const QRCode = require("qrcode");
 const { createCanvas, loadImage } = require("canvas");
 const AWS = require("aws-sdk");
-const mongoose = require("mongoose");
+const eventEmitter = require("./event");
 const { v4: uuidv4 } = require("uuid");
 const dotenv = require("dotenv");
 const qrQueue = require("./queue");
+const resolveAccountNumber = require("./providers/paystack");
+const redisClient = require("./utils/redis");
+const connectDB = require("./config/db");
+const QRCodeModel = require("./models/qr.model");
 const cloudinary = require("cloudinary").v2;
-
 
 dotenv.config({});
 
@@ -17,7 +20,7 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-
+connectDB();
 const app = express();
 const port = 3000;
 const BUCKET_NAME = "qrcoded";
@@ -34,27 +37,27 @@ AWS.config.update({
 
 const s3 = new AWS.S3();
 
-mongoose.connect(MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-});
+// mongoose.connect(MONGO_URI, {
+//   useNewUrlParser: true,
+//   useUnifiedTopology: true,
+// });
 
-// 3. Mongoose Schema and Model
-const qrSchema = new mongoose.Schema({
-  uuid: String,
-  s3URL: String,
-  firstName: { type: String, default: "" },
-  lastName: { type: String, default: "" },
-  accountNumber: { type: String, default: "" },
-  isActivated: { type: Boolean, default: false },
-});
+// // 3. Mongoose Schema and Model
+// const qrSchema = new mongoose.Schema({
+//   uuid: String,
+//   s3URL: String,
+//   firstName: { type: String, default: "" },
+//   lastName: { type: String, default: "" },
+//   accountNumber: { type: String, default: "" },
+//   isActivated: { type: Boolean, default: false },
+// });
 
-const QRCodeModel = mongoose.model("QRCode", qrSchema);
+// const QRCodeModel = mongoose.model("QRCode", qrSchema);
 
 qrQueue.process(async (job) => {
   try {
     const uuid = uuidv4();
-    const data = `https://momo-payment-48xe4nhf9-iamswart.vercel.app/?uuid=${uuid}`;
+    const data = `https://swartjide.com?uuid=${uuid}`;
     const buffer = await generateCustomQRCode(data);
     const cloudinaryLink = await uploadToCloudinary(buffer); // Notice the change here
     const qrEntry = new QRCodeModel({ uuid, s3URL: cloudinaryLink }); // Maybe rename `s3URL` to a more generic name
@@ -131,35 +134,73 @@ app.post("/generateQR", async (req, res) => {
   res.json({ message: `${count} QR Code(s) generation in process` });
 });
 
-app.post("/activate", async (req, res) => {
-  const { id, firstName, lastName, accountNumber } = req.body;
+app.get("/resolve-account", async (req, res) => {
+  const qrCode = await QRCodeModel.findOne({
+    uuid: req.body.id,
+    isActivated: true,
+  });
 
-  if (!id || !firstName || !lastName || !accountNumber) {
-    return res.status(400).json({
-      message:
-        "All fields (id, firstName, lastName, accountNumber) are required.",
-    });
+  if (qrCode) {
+    return res.status(400).json({ message: "QR already activated" });
+  }
+
+  const accountNumber = await QRCodeModel.findOne({
+    accountNumber: req.body.accountNumber,
+  });
+
+  if (accountNumber) {
+    return res.status(400).json({ message: "Account number already exists" });
   }
 
   try {
-    const qrModel = await QRCodeModel.findOne({ uuid: id });
+    const accountDetails = await resolveAccountNumber(
+      Number(req.body.accountNumber)
+    );
 
-    if (!qrModel) {
-      return res.status(404).json({ message: "QR Code not found." });
+    // const filter = { accountNumber: accountDetails.data.account_number }; // You need to specify the condition to match the document you want to update
+    // const update = {
+    //   isActivated: true,
+    //   firstName: firstName,
+    //   lastName: lastName,
+    // };
+
+    // await QRCodeModel.updateOne(filter, update);
+
+    await redisClient.set(
+      `resolvedName_${req.body.accountNumber}`,
+      JSON.stringify(accountDetails)
+    );
+    eventEmitter.emit("accountResolved", accountDetails.data);
+    return res.json({
+      accountDetails,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error });
+  }
+});
+
+app.get("/verify-account", async (req, res) => {
+  try {
+    const otp = await redisClient.get(
+      `phone_verification_${req.body.accountNumber}`
+    );
+    if (!otp) {
+      return res.status(400).json({ message: "OTP not found" });
+    }
+    if (otp !== req.body.otp) {
+      return res.status(400).json({ message: "Incorrect OTP" });
     }
 
-    // Update the QR code model
-    await qrModel.updateOne({
-      isActivated: true,
-      firstName: firstName,
-      lastName: lastName,
-      accountNumber: accountNumber,
-    });
+    const resolvedAccount = JSON.parse(
+      await redisClient.get(`resolvedName_${req.body.accountNumber}`)
+    );
 
-    res.json({ message: "Activation successful" });
+    eventEmitter.emit("accountVerified", resolvedAccount);
+    return res.json({
+      message: "Account linked successfully",
+    });
   } catch (error) {
-    console.error("Error activating QR code:", error);
-    res.status(500).json({ message: "Server error" });
+    res.status(500).json({ message: "Server error", error });
   }
 });
 
@@ -196,3 +237,7 @@ app.post("/info", async (req, res) => {
 app.listen(port, () => {
   console.log(`Server started on http://localhost:${port}`);
 });
+
+module.exports = {
+  QRCodeModel,
+};
